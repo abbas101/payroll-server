@@ -18,6 +18,7 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 app.use('/api/auth', authRouter);
 app.use('/api/employees', requireAuth, employeesRouter);
+app.use('/api/subcontractors', requireAuth, employeesRouter);
 app.use('/api/payroll', requireAuth, payrollRouter);
 
 app.use((err, _req, res, _next) => {

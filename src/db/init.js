@@ -5,6 +5,7 @@ import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { seedWeeklySheet } from './seedSheet.js';
+import { ensureWeeks2026 } from './ensureWeekRows.js';
 
 dotenv.config();
 
@@ -55,8 +56,11 @@ async function init() {
     console.log('Default login: admin / admin123');
   }
 
+  const weekCount = await ensureWeeks2026(connection);
+  console.log(`Created ${weekCount} weeks for 2026 with subcontractor rows`);
+
   const weekId = await seedWeeklySheet(connection);
-  console.log(`Imported sheet week id=${weekId} (Mon 5 Oct – Sun 11 Oct 2026)`);
+  console.log(`Imported sample sheet week id=${weekId} (Mon 5 Oct – Sun 11 Oct 2026)`);
 
   await connection.end();
   console.log('Database initialized: payroll');

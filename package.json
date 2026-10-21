@@ -6,7 +6,8 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "db:init": "node src/db/init.js",
-    "db:seed": "node src/db/seedOnly.js"
+    "db:seed": "node src/db/seedOnly.js",
+    "db:migrate": "node src/db/migrateV2.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

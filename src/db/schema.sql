@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS payroll_weeks (
 CREATE TABLE IF NOT EXISTS timesheet_rows (
   id INT AUTO_INCREMENT PRIMARY KEY,
   payroll_week_id INT NOT NULL,
-  employee_id INT NOT NULL,
+  employee_id INT NULL,
   sort_order INT NOT NULL DEFAULT 0,
   hourly_rate DECIMAL(10, 2) NOT NULL DEFAULT 0,
   hours_mon DECIMAL(5, 2) NOT NULL DEFAULT 0,
@@ -52,5 +52,5 @@ CREATE TABLE IF NOT EXISTS timesheet_rows (
   use_manual_pay TINYINT(1) NOT NULL DEFAULT 0,
   notes TEXT,
   FOREIGN KEY (payroll_week_id) REFERENCES payroll_weeks(id) ON DELETE CASCADE,
-  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL
 );
