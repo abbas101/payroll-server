@@ -1,30 +1,26 @@
 import { Router } from 'express';
-import pool from '../db/pool.js';
+import Employee from '../models/Employee.js';
+import { isObjectId } from '../utils/ids.js';
 
 const router = Router();
 
 router.get('/', async (req, res) => {
-  const status = req.query.status;
   try {
-    let sql = 'SELECT * FROM employees WHERE 1=1';
-    const params = [];
-    if (status) {
-      sql += ' AND status = ?';
-      params.push(status);
-    }
-    sql += ' ORDER BY full_name';
-    const [rows] = await pool.query(sql, params);
-    res.json(rows);
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    const rows = await Employee.find(filter).sort({ fullName: 1 });
+    res.json(rows.map((row) => row.toApi()));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.get('/:id', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Subcontractor not found' });
   try {
-    const [rows] = await pool.query('SELECT * FROM employees WHERE id = ?', [req.params.id]);
-    if (!rows.length) return res.status(404).json({ error: 'Subcontractor not found' });
-    res.json(rows[0]);
+    const employee = await Employee.findById(req.params.id);
+    if (!employee) return res.status(404).json({ error: 'Subcontractor not found' });
+    res.json(employee.toApi());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -34,23 +30,28 @@ router.post('/', async (req, res) => {
   const { full_name, default_hourly_rate, default_hst_applies = true } = req.body;
   if (!full_name?.trim()) return res.status(400).json({ error: 'full_name is required' });
   try {
-    const [result] = await pool.query(
-      'INSERT INTO employees (full_name, default_hourly_rate, default_hst_applies) VALUES (?, ?, ?)',
-      [full_name.trim(), default_hourly_rate ?? 0, default_hst_applies ? 1 : 0]
-    );
-    res.status(201).json({ id: result.insertId });
+    const employee = await Employee.create({
+      fullName: full_name.trim(),
+      defaultHourlyRate: default_hourly_rate ?? 0,
+      defaultHstApplies: Boolean(default_hst_applies),
+    });
+    res.status(201).json({ id: employee._id.toString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.put('/:id', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Subcontractor not found' });
   const { full_name, default_hourly_rate, default_hst_applies, status } = req.body;
   try {
-    await pool.query(
-      `UPDATE employees SET full_name=?, default_hourly_rate=?, default_hst_applies=?, status=COALESCE(?, status) WHERE id=?`,
-      [full_name, default_hourly_rate ?? 0, default_hst_applies ? 1 : 0, status, req.params.id]
-    );
+    const employee = await Employee.findById(req.params.id);
+    if (!employee) return res.status(404).json({ error: 'Subcontractor not found' });
+    employee.fullName = full_name;
+    employee.defaultHourlyRate = default_hourly_rate ?? 0;
+    employee.defaultHstApplies = Boolean(default_hst_applies);
+    if (status) employee.status = status;
+    await employee.save();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -58,8 +59,12 @@ router.put('/:id', async (req, res) => {
 });
 
 router.delete('/:id', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Subcontractor not found' });
   try {
-    await pool.query('UPDATE employees SET status = ? WHERE id = ?', ['inactive', req.params.id]);
+    const employee = await Employee.findById(req.params.id);
+    if (!employee) return res.status(404).json({ error: 'Subcontractor not found' });
+    employee.status = 'inactive';
+    await employee.save();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

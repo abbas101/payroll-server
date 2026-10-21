@@ -1,88 +1,95 @@
 import { Router } from 'express';
-import pool from '../db/pool.js';
-import { ensureWeekRows } from '../db/ensureWeekRows.js';
+import Employee from '../models/Employee.js';
+import PayrollWeek, {
+  applyCalc,
+  entryToApi,
+  entryToCalcRow,
+  weekToApi,
+} from '../models/PayrollWeek.js';
+import { ensureWeekRows, ensureWeeks2026 } from '../db/ensureWeekRows.js';
 import { findCurrentWeekStart } from '../db/weeks2026.js';
 import { calcTimesheetRow, rowFromDb } from '../utils/payrollCalc.js';
+import { isObjectId } from '../utils/ids.js';
 
 const router = Router();
+const num = (v) => (v == null || v === '' ? 0 : Number(v));
 
-function mapRow(r) {
-  return {
-    ...r,
-    hst_applies: Boolean(r.hst_applies),
-    use_manual_pay: Boolean(r.use_manual_pay),
-    full_name: r.full_name || '',
-    subcontractor_status: r.subcontractor_status || null,
-  };
+function weekEntries(week) {
+  return [...week.entries].sort((a, b) => a.sortOrder - b.sortOrder || String(a._id).localeCompare(String(b._id)));
 }
 
-const rowSelect = `
-  SELECT tr.*, e.full_name, e.status AS subcontractor_status
-  FROM timesheet_rows tr
-  LEFT JOIN employees e ON e.id = tr.employee_id
-`;
+function payoutOf(week) {
+  return week.entries.reduce((sum, entry) => sum + (Number(entry.totalToPay) || 0), 0);
+}
+
+async function employeeMapFor(entries) {
+  const ids = [...new Set(entries.filter((e) => e.employeeId).map((e) => String(e.employeeId)))];
+  const employees = await Employee.find({ _id: { $in: ids } }).select('fullName status');
+  return new Map(
+    employees.map((e) => [e._id.toString(), { fullName: e.fullName, status: e.status }])
+  );
+}
+
+function rowsApi(week, empMap) {
+  return weekEntries(week).map((entry) => {
+    const meta = entry.employeeId ? empMap.get(String(entry.employeeId)) : null;
+    return entryToApi(entry, week._id, meta || '');
+  });
+}
+
+function statsForWeek(week) {
+  let total_pay = 0;
+  let total_invoices = 0;
+  let total_to_pay = 0;
+  for (const entry of week.entries) {
+    total_pay += Number(entry.totalPay) || 0;
+    total_to_pay += Number(entry.totalToPay) || 0;
+    if (entry.hstApplies) total_invoices += Number(entry.totalToPay) || 0;
+  }
+  const row_count = week.entries.length;
+  const avg_pay = row_count ? total_to_pay / row_count : 0;
+  return { total_pay, total_invoices, total_to_pay, avg_pay, row_count };
+}
 
 router.get('/dashboard', async (_req, res) => {
   try {
     const currentWeekStart = findCurrentWeekStart();
-    const year = new Date().getFullYear();
+    const year = String(new Date().getFullYear());
 
-    const [[empStats]] = await pool.query(
-      "SELECT COUNT(*) AS total, SUM(status='active') AS active FROM employees"
-    );
-
-    const [[currentWeek]] = await pool.query('SELECT id FROM payroll_weeks WHERE week_start = ?', [
-      currentWeekStart,
+    const [total, active] = await Promise.all([
+      Employee.countDocuments(),
+      Employee.countDocuments({ status: 'active' }),
     ]);
 
-    let currentWeekId = currentWeek?.id;
-    if (!currentWeekId) {
-      const { ensureWeeks2026 } = await import('../db/ensureWeekRows.js');
+    let currentWeek = await PayrollWeek.findOne({ weekStart: currentWeekStart });
+    if (!currentWeek) {
       await ensureWeeks2026();
-      const [[again]] = await pool.query('SELECT id FROM payroll_weeks WHERE week_start = ?', [currentWeekStart]);
-      currentWeekId = again?.id;
+      currentWeek = await PayrollWeek.findOne({ weekStart: currentWeekStart });
     }
 
-    let currentWeekStats = { total_pay: 0, total_invoices: 0, total_to_pay: 0, avg_pay: 0, row_count: 0 };
-    if (currentWeekId) {
-      const [[stats]] = await pool.query(
-        `SELECT
-          COALESCE(SUM(total_pay), 0) AS total_pay,
-          COALESCE(SUM(CASE WHEN hst_applies = 1 THEN total_to_pay ELSE 0 END), 0) AS total_invoices,
-          COALESCE(SUM(total_to_pay), 0) AS total_to_pay,
-          COALESCE(AVG(total_to_pay), 0) AS avg_pay,
-          COUNT(*) AS row_count
-         FROM timesheet_rows WHERE payroll_week_id = ?`,
-        [currentWeekId]
-      );
-      currentWeekStats = stats;
+    let currentWeekStats = { total_pay: 0, total_invoices: 0, total_to_pay: 0, avg_pay: 0 };
+    if (currentWeek) {
+      currentWeekStats = statsForWeek(currentWeek);
     }
 
-    const [[yearStats]] = await pool.query(
-      `SELECT COALESCE(SUM(tr.total_to_pay), 0) AS total_paid_ytd
-       FROM timesheet_rows tr
-       INNER JOIN payroll_weeks pw ON pw.id = tr.payroll_week_id
-       WHERE YEAR(pw.week_start) = ? AND pw.week_start <= CURDATE()`,
-      [year]
-    );
+    const weeksYtd = await PayrollWeek.find({
+      weekStart: { $gte: `${year}-01-01`, $lte: currentWeekStart },
+    });
+    const totalPaidYtd = weeksYtd.reduce((sum, w) => sum + payoutOf(w), 0);
 
-    const [recentWeeks] = await pool.query(
-      `SELECT pw.*,
-        (SELECT COALESCE(SUM(total_to_pay), 0) FROM timesheet_rows tr WHERE tr.payroll_week_id = pw.id) AS total_payout
-       FROM payroll_weeks pw ORDER BY week_start DESC LIMIT 8`
-    );
+    const recentWeeks = await PayrollWeek.find().sort({ weekStart: -1 }).limit(8);
 
     res.json({
-      activeSubcontractors: empStats.active ?? 0,
-      totalSubcontractors: empStats.total ?? 0,
+      activeSubcontractors: active,
+      totalSubcontractors: total,
       currentWeekStart,
-      currentWeekId,
-      currentWeekTotalPay: Number(currentWeekStats.total_pay),
-      currentWeekInvoices: Number(currentWeekStats.total_invoices),
-      currentWeekTotalToPay: Number(currentWeekStats.total_to_pay),
-      averagePayCurrentWeek: Number(currentWeekStats.avg_pay),
-      totalPaidYtd: Number(yearStats.total_paid_ytd),
-      recentWeeks,
+      currentWeekId: currentWeek?._id?.toString() ?? null,
+      currentWeekTotalPay: currentWeekStats.total_pay,
+      currentWeekInvoices: currentWeekStats.total_invoices,
+      currentWeekTotalToPay: currentWeekStats.total_to_pay,
+      averagePayCurrentWeek: currentWeekStats.avg_pay,
+      totalPaidYtd,
+      recentWeeks: recentWeeks.map((w) => ({ ...weekToApi(w), total_payout: payoutOf(w) })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -90,18 +97,16 @@ router.get('/dashboard', async (_req, res) => {
 });
 
 router.get('/weeks', async (req, res) => {
-  const year = req.query.year || 2026;
+  const year = String(req.query.year || 2026);
   try {
-    const [rows] = await pool.query(
-      `SELECT pw.*,
-        (SELECT COUNT(*) FROM timesheet_rows tr WHERE tr.payroll_week_id = pw.id) AS row_count,
-        (SELECT COALESCE(SUM(total_to_pay), 0) FROM timesheet_rows tr WHERE tr.payroll_week_id = pw.id) AS total_payout
-       FROM payroll_weeks pw
-       WHERE YEAR(pw.week_start) = ?
-       ORDER BY pw.week_start ASC`,
-      [year]
+    const weeks = await PayrollWeek.find({ weekStart: { $regex: `^${year}-` } }).sort({ weekStart: 1 });
+    res.json(
+      weeks.map((week) => ({
+        ...weekToApi(week),
+        row_count: week.entries.length,
+        total_payout: payoutOf(week),
+      }))
     );
-    res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -109,7 +114,6 @@ router.get('/weeks', async (req, res) => {
 
 router.post('/weeks/sync-2026', async (_req, res) => {
   try {
-    const { ensureWeeks2026 } = await import('../db/ensureWeekRows.js');
     const count = await ensureWeeks2026();
     res.json({ ok: true, weeks: count });
   } catch (err) {
@@ -119,37 +123,39 @@ router.post('/weeks/sync-2026', async (_req, res) => {
 
 router.get('/weeks/by-date/:weekStart', async (req, res) => {
   try {
-    let [weeks] = await pool.query('SELECT * FROM payroll_weeks WHERE week_start = ?', [req.params.weekStart]);
-    if (!weeks.length) {
-      const { ensureWeeks2026 } = await import('../db/ensureWeekRows.js');
+    let week = await PayrollWeek.findOne({ weekStart: req.params.weekStart.slice(0, 10) });
+    if (!week) {
       await ensureWeeks2026();
-      [weeks] = await pool.query('SELECT * FROM payroll_weeks WHERE week_start = ?', [req.params.weekStart]);
+      week = await PayrollWeek.findOne({ weekStart: req.params.weekStart.slice(0, 10) });
     }
-    if (!weeks.length) return res.status(404).json({ error: 'Week not found' });
-    res.json(weeks[0]);
+    if (!week) return res.status(404).json({ error: 'Week not found' });
+    res.json(weekToApi(week));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.get('/weeks/:id', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Week not found' });
   try {
-    const [weeks] = await pool.query('SELECT * FROM payroll_weeks WHERE id = ?', [req.params.id]);
-    if (!weeks.length) return res.status(404).json({ error: 'Week not found' });
-    await ensureWeekRows(req.params.id);
-    const [rows] = await pool.query(`${rowSelect} WHERE tr.payroll_week_id = ? ORDER BY tr.sort_order, tr.id`, [
-      req.params.id,
-    ]);
-    res.json({ week: weeks[0], rows: rows.map(mapRow) });
+    const week = await PayrollWeek.findById(req.params.id);
+    if (!week) return res.status(404).json({ error: 'Week not found' });
+    await ensureWeekRows(week._id);
+    const refreshed = await PayrollWeek.findById(req.params.id);
+    const empMap = await employeeMapFor(refreshed.entries);
+    res.json({ week: weekToApi(refreshed), rows: rowsApi(refreshed, empMap) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.post('/weeks/:id/rows', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Week not found' });
+
   let {
     employee_id,
     new_subcontractor_name,
+    new_worker_name,
     hourly_rate,
     hours_mon = 0,
     hours_tue = 0,
@@ -167,92 +173,90 @@ router.post('/weeks/:id/rows', async (req, res) => {
     notes = '',
   } = req.body;
 
+  const newName = new_subcontractor_name || new_worker_name;
+
   try {
-    if (!employee_id && new_subcontractor_name?.trim()) {
-      const name = new_subcontractor_name.trim();
-      const [ins] = await pool.query(
-        'INSERT INTO employees (full_name, default_hourly_rate, default_hst_applies) VALUES (?, ?, ?)',
-        [name, hourly_rate ?? 0, hst_applies ? 1 : 0]
-      );
-      employee_id = ins.insertId;
+    const week = await PayrollWeek.findById(req.params.id);
+    if (!week) return res.status(404).json({ error: 'Week not found' });
+
+    if (!employee_id && newName?.trim()) {
+      const created = await Employee.create({
+        fullName: newName.trim(),
+        defaultHourlyRate: hourly_rate ?? 0,
+        defaultHstApplies: Boolean(hst_applies),
+      });
+      employee_id = created._id.toString();
     }
 
-    const [maxSort] = await pool.query(
-      'SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort FROM timesheet_rows WHERE payroll_week_id = ?',
-      [req.params.id]
-    );
+    let rate = num(hourly_rate);
+    let hst = Boolean(hst_applies);
+    let employee = null;
 
-    let rate = hourly_rate ?? 0;
-    let hst = hst_applies ? 1 : 0;
     if (employee_id) {
-      const [emp] = await pool.query('SELECT * FROM employees WHERE id = ?', [employee_id]);
-      if (!emp.length) return res.status(404).json({ error: 'Subcontractor not found' });
-      rate = hourly_rate ?? emp[0].default_hourly_rate;
-      hst = hst_applies !== undefined ? (hst_applies ? 1 : 0) : emp[0].default_hst_applies;
+      if (!isObjectId(String(employee_id))) return res.status(404).json({ error: 'Subcontractor not found' });
+      employee = await Employee.findById(employee_id);
+      if (!employee) return res.status(404).json({ error: 'Subcontractor not found' });
+      rate = hourly_rate ?? employee.defaultHourlyRate;
+      hst = hst_applies !== undefined ? Boolean(hst_applies) : employee.defaultHstApplies;
     }
 
     const draft = {
-      hours_mon,
-      hours_tue,
-      hours_wed,
-      hours_thu,
-      hours_fri,
-      hours_sat,
-      hours_sun,
-      hourly_rate: rate,
-      hst_applies: hst,
-      materials,
-      gas_parking,
-      extras,
-      total_pay: use_manual_pay ? total_pay : undefined,
-      use_manual_pay: use_manual_pay ? 1 : 0,
+      hours: {
+        mon: num(hours_mon),
+        tue: num(hours_tue),
+        wed: num(hours_wed),
+        thu: num(hours_thu),
+        fri: num(hours_fri),
+        sat: num(hours_sat),
+        sun: num(hours_sun),
+      },
+      hourlyRate: num(rate),
+      hstApplies: hst,
+      materials: num(materials),
+      gasParking: num(gas_parking),
+      extras: num(extras),
+      totalPay: use_manual_pay ? num(total_pay) : undefined,
+      useManualPay: Boolean(use_manual_pay),
     };
-    const calc = calcTimesheetRow(rowFromDb(draft));
+    const calc = calcTimesheetRow(rowFromDb(entryToCalcRow(draft)));
+    const sortOrder = week.entries.reduce((max, entry) => Math.max(max, entry.sortOrder), -1) + 1;
 
-    const [result] = await pool.query(
-      `INSERT INTO timesheet_rows (
-        payroll_week_id, employee_id, sort_order, hourly_rate,
-        hours_mon, hours_tue, hours_wed, hours_thu, hours_fri, hours_sat, hours_sun,
-        total_hours, hst_applies, total_pay, materials, gas_parking, extras, total_to_pay, use_manual_pay, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.params.id,
-        employee_id || null,
-        maxSort[0].next_sort,
-        rate,
-        hours_mon,
-        hours_tue,
-        hours_wed,
-        hours_thu,
-        hours_fri,
-        hours_sat,
-        hours_sun,
-        calc.total_hours,
-        hst,
-        calc.total_pay,
-        materials,
-        gas_parking,
-        extras,
-        calc.total_to_pay,
-        use_manual_pay ? 1 : 0,
-        notes || null,
-      ]
-    );
+    week.entries.push({
+      employeeId: employee?._id ?? null,
+      sortOrder,
+      hourlyRate: num(rate),
+      hours: draft.hours,
+      totalHours: calc.total_hours,
+      hstApplies: hst,
+      totalPay: calc.total_pay,
+      materials: num(materials),
+      gasParking: num(gas_parking),
+      extras: num(extras),
+      totalToPay: calc.total_to_pay,
+      useManualPay: Boolean(use_manual_pay),
+      notes: notes || null,
+    });
+    await week.save();
 
-    const [created] = await pool.query(`${rowSelect} WHERE tr.id = ?`, [result.insertId]);
-    res.status(201).json(mapRow(created[0]));
+    const created = week.entries[week.entries.length - 1];
+    const meta = employee ? { fullName: employee.fullName, status: employee.status } : '';
+    res.status(201).json(entryToApi(created, week._id, meta));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.delete('/weeks/:weekId/rows/:rowId', async (req, res) => {
+  if (!isObjectId(req.params.weekId) || !isObjectId(req.params.rowId)) {
+    return res.status(404).json({ error: 'Row not found' });
+  }
   try {
-    const [result] = await pool.query('DELETE FROM timesheet_rows WHERE id = ? AND payroll_week_id = ?', [
-      req.params.rowId,
-      req.params.weekId,
-    ]);
-    if (!result.affectedRows) return res.status(404).json({ error: 'Row not found' });
+    const week = await PayrollWeek.findById(req.params.weekId);
+    if (!week) return res.status(404).json({ error: 'Row not found' });
+    const entry = week.entries.id(req.params.rowId);
+    if (!entry) return res.status(404).json({ error: 'Row not found' });
+    week.entries.pull(req.params.rowId);
+    await week.save();
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -260,80 +264,73 @@ router.delete('/weeks/:weekId/rows/:rowId', async (req, res) => {
 });
 
 router.patch('/weeks/:weekId/rows/:rowId', async (req, res) => {
+  if (!isObjectId(req.params.weekId) || !isObjectId(req.params.rowId)) {
+    return res.status(404).json({ error: 'Row not found' });
+  }
+
   try {
-    const [rows] = await pool.query('SELECT * FROM timesheet_rows WHERE id = ? AND payroll_week_id = ?', [
-      req.params.rowId,
-      req.params.weekId,
-    ]);
-    if (!rows.length) return res.status(404).json({ error: 'Row not found' });
+    const week = await PayrollWeek.findById(req.params.weekId);
+    if (!week) return res.status(404).json({ error: 'Row not found' });
+    const entry = week.entries.id(req.params.rowId);
+    if (!entry) return res.status(404).json({ error: 'Row not found' });
 
-    const merged = { ...rows[0], ...req.body, use_manual_pay: 0 };
+    const body = req.body;
 
-    if (req.body.employee_id !== undefined) {
+    if (body.employee_id !== undefined) {
       const eid =
-        req.body.employee_id === null || req.body.employee_id === '' ? null : Number(req.body.employee_id);
-      merged.employee_id = eid;
+        body.employee_id === null || body.employee_id === '' ? null : String(body.employee_id);
+      if (eid && !isObjectId(eid)) return res.status(404).json({ error: 'Subcontractor not found' });
+      entry.employeeId = eid || undefined;
       if (eid) {
-        const [emp] = await pool.query('SELECT * FROM employees WHERE id = ?', [eid]);
-        if (emp.length) {
-          merged.hourly_rate = emp[0].default_hourly_rate;
-          merged.hst_applies = emp[0].default_hst_applies ? 1 : 0;
+        const employee = await Employee.findById(eid);
+        if (employee) {
+          entry.hourlyRate = employee.defaultHourlyRate;
+          entry.hstApplies = employee.defaultHstApplies;
         }
       }
     }
 
-    if (req.body.hst_applies !== undefined) merged.hst_applies = req.body.hst_applies ? 1 : 0;
+    if (body.hourly_rate !== undefined) entry.hourlyRate = num(body.hourly_rate);
+    if (body.hours_mon !== undefined) entry.hours.mon = num(body.hours_mon);
+    if (body.hours_tue !== undefined) entry.hours.tue = num(body.hours_tue);
+    if (body.hours_wed !== undefined) entry.hours.wed = num(body.hours_wed);
+    if (body.hours_thu !== undefined) entry.hours.thu = num(body.hours_thu);
+    if (body.hours_fri !== undefined) entry.hours.fri = num(body.hours_fri);
+    if (body.hours_sat !== undefined) entry.hours.sat = num(body.hours_sat);
+    if (body.hours_sun !== undefined) entry.hours.sun = num(body.hours_sun);
+    if (body.hst_applies !== undefined) entry.hstApplies = Boolean(body.hst_applies);
+    if (body.materials !== undefined) entry.materials = num(body.materials);
+    if (body.gas_parking !== undefined) entry.gasParking = num(body.gas_parking);
+    if (body.extras !== undefined) entry.extras = num(body.extras);
+    if (body.notes !== undefined) entry.notes = body.notes || null;
 
-    const calc = calcTimesheetRow(rowFromDb(merged));
+    entry.useManualPay = false;
+    applyCalc(entry, calcTimesheetRow(rowFromDb(entryToCalcRow(entry))));
+    week.markModified('entries');
+    await week.save();
 
-    await pool.query(
-      `UPDATE timesheet_rows SET
-        employee_id = ?, hourly_rate = ?, hours_mon = ?, hours_tue = ?, hours_wed = ?, hours_thu = ?,
-        hours_fri = ?, hours_sat = ?, hours_sun = ?, hst_applies = ?, materials = ?, gas_parking = ?,
-        extras = ?, notes = ?, total_hours = ?, total_pay = ?, total_to_pay = ?, use_manual_pay = 0
-       WHERE id = ?`,
-      [
-        merged.employee_id,
-        merged.hourly_rate,
-        merged.hours_mon,
-        merged.hours_tue,
-        merged.hours_wed,
-        merged.hours_thu,
-        merged.hours_fri,
-        merged.hours_sat,
-        merged.hours_sun,
-        merged.hst_applies,
-        merged.materials ?? 0,
-        merged.gas_parking ?? 0,
-        merged.extras ?? 0,
-        merged.notes ?? null,
-        calc.total_hours,
-        calc.total_pay,
-        calc.total_to_pay,
-        req.params.rowId,
-      ]
-    );
-
-    const [updated] = await pool.query(`${rowSelect} WHERE tr.id = ?`, [req.params.rowId]);
-    res.json(mapRow(updated[0]));
+    let meta = '';
+    if (entry.employeeId) {
+      const employee = await Employee.findById(entry.employeeId).select('fullName status');
+      if (employee) meta = { fullName: employee.fullName, status: employee.status };
+    }
+    res.json(entryToApi(entry, week._id, meta));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 router.post('/weeks/:id/recalculate', async (req, res) => {
+  if (!isObjectId(req.params.id)) return res.status(404).json({ error: 'Week not found' });
   try {
-    const [rows] = await pool.query('SELECT * FROM timesheet_rows WHERE payroll_week_id = ?', [req.params.id]);
-    for (const r of rows) {
-      const calc = calcTimesheetRow(rowFromDb(r));
-      await pool.query('UPDATE timesheet_rows SET total_hours=?, total_pay=?, total_to_pay=? WHERE id=?', [
-        calc.total_hours,
-        calc.total_pay,
-        calc.total_to_pay,
-        r.id,
-      ]);
+    const week = await PayrollWeek.findById(req.params.id);
+    if (!week) return res.status(404).json({ error: 'Week not found' });
+    for (const entry of week.entries) {
+      applyCalc(entry, calcTimesheetRow(rowFromDb(entryToCalcRow(entry))));
     }
-    res.json({ ok: true, rows: rows.length });
+    week.markModified('entries');
+    await week.save();
+    res.json({ ok: true, rows: week.entries.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

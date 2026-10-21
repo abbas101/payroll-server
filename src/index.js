@@ -1,3 +1,4 @@
+import { connectDb } from './db/connect.js';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -26,6 +27,13 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Payroll API running on http://localhost:${PORT}`);
-});
+connectDb()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Payroll API running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error(err.message || err);
+    process.exit(1);
+  });

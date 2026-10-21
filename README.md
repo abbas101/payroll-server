@@ -1,16 +1,27 @@
 # payroll-server
 
-Node.js + Express + MySQL API for weekly payroll timesheets (CAD, HST).
+Node.js + Express + **MongoDB** API for weekly payroll timesheets (CAD, HST).
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env
-npm run db:init
+# Set MONGODB_URI in .env
+npm run db:seed
 npm run dev
 ```
 
-API: http://localhost:5000
+Optional: import legacy MySQL dump into MongoDB:
 
-Default login user is created in DB init: `admin` / `admin123`
+```bash
+npm run db:import -- ../payroll.sql
+```
+
+Sync all 2026 Monday-start weeks:
+
+```bash
+npm run db:migrate
+```
+
+API: http://localhost:5000 — default login after seed: `admin` / `admin123`

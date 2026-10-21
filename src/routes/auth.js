@@ -1,10 +1,18 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import pool from '../db/pool.js';
+import User from '../models/User.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = Router();
+
+function signToken(user) {
+  return jwt.sign(
+    { id: user._id.toString(), username: user.username, role: user.role },
+    process.env.JWT_SECRET || 'payroll-dev-secret-change-in-production',
+    { expiresIn: '7d' }
+  );
+}
 
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
@@ -13,23 +21,13 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const [rows] = await pool.query('SELECT * FROM users WHERE username = ?', [username.trim()]);
-    if (!rows.length) return res.status(401).json({ error: 'Invalid username or password' });
+    const user = await User.findOne({ username: username.trim() }).select('+passwordHash');
+    if (!user) return res.status(401).json({ error: 'Invalid username or password' });
 
-    const user = rows[0];
-    const ok = await bcrypt.compare(password, user.password_hash);
+    const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: 'Invalid username or password' });
 
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET || 'payroll-dev-secret-change-in-production',
-      { expiresIn: '7d' }
-    );
-
-    res.json({
-      token,
-      user: { id: user.id, username: user.username, full_name: user.full_name, role: user.role },
-    });
+    res.json({ token: signToken(user), user: user.toApi() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -37,12 +35,9 @@ router.post('/login', async (req, res) => {
 
 router.get('/me', requireAuth, async (req, res) => {
   try {
-    const [rows] = await pool.query(
-      'SELECT id, username, full_name, role FROM users WHERE id = ?',
-      [req.user.id]
-    );
-    if (!rows.length) return res.status(401).json({ error: 'User not found' });
-    res.json(rows[0]);
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+    res.json(user.toApi());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
