@@ -1,3 +1,4 @@
+import dns from 'dns';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -16,6 +17,12 @@ export async function connectDb() {
   const uri = mongoUri();
   if (!uri) {
     throw new Error('MONGODB_URI is not set. Add it to server/env or server/.env');
+  }
+
+  if (uri.startsWith('mongodb+srv://')) {
+    const servers = process.env.MONGODB_DNS_SERVERS?.split(',').map((s) => s.trim()).filter(Boolean);
+    if (servers?.length) dns.setServers(servers);
+    else dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
   }
 
   mongoose.set('strictQuery', true);
