@@ -29,7 +29,11 @@ export function calcTimesheetRow(row) {
   const extras = Number(row.extras) || 0;
   const subtotal = labor + materials + gas_parking + extras;
   const hst = Boolean(row.hst_applies);
-  const total_to_pay = hst ? round2(subtotal * (1 + HST_RATE)) : round2(subtotal);
+  const total_to_pay = row.use_manual_to_pay
+    ? round2(row.total_to_pay)
+    : hst
+      ? round2(subtotal * (1 + HST_RATE))
+      : round2(subtotal);
 
   return {
     total_hours,
@@ -54,6 +58,8 @@ export function rowFromDb(r) {
     extras: r.extras,
     total_pay: r.total_pay,
     use_manual_pay: Boolean(r.use_manual_pay),
+    use_manual_to_pay: Boolean(r.use_manual_to_pay),
+    total_to_pay: r.total_to_pay,
     total_hours: r.total_hours,
   };
 }

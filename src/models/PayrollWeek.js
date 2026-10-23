@@ -22,6 +22,7 @@ const entrySchema = new mongoose.Schema(
     extras: { type: Number, required: true, default: 0 },
     totalToPay: { type: Number, required: true, default: 0 },
     useManualPay: { type: Boolean, required: true, default: false },
+    useManualToPay: { type: Boolean, required: true, default: false },
     notes: { type: String, default: null },
   },
   { _id: true }
@@ -73,6 +74,7 @@ export function entryToApi(entry, weekId, employeeMeta) {
     extras: entry.extras,
     total_to_pay: entry.totalToPay,
     use_manual_pay: Boolean(entry.useManualPay),
+    use_manual_to_pay: Boolean(entry.useManualToPay),
     notes: entry.notes ?? null,
     full_name: fullName ?? '',
     subcontractor_status: subcontractorStatus,
@@ -96,6 +98,8 @@ export function entryToCalcRow(entry) {
     extras: entry.extras,
     total_pay: entry.totalPay,
     use_manual_pay: entry.useManualPay,
+    use_manual_to_pay: entry.useManualToPay,
+    total_to_pay: entry.totalToPay,
     total_hours: entry.totalHours,
   };
 }

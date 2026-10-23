@@ -316,6 +316,18 @@ router.patch('/weeks/:weekId/rows/:rowId', async (req, res) => {
       }
     }
 
+    if (body.use_manual_to_pay !== undefined) {
+      entry.useManualToPay = Boolean(body.use_manual_to_pay);
+    }
+    if (body.total_to_pay !== undefined) {
+      if (body.use_manual_to_pay === false) {
+        entry.useManualToPay = false;
+      } else if (body.total_to_pay !== '' && body.total_to_pay !== null) {
+        entry.useManualToPay = true;
+        entry.totalToPay = num(body.total_to_pay);
+      }
+    }
+
     applyCalc(entry, calcTimesheetRow(rowFromDb(entryToCalcRow(entry))));
     week.markModified('entries');
     await week.save();
