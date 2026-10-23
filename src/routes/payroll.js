@@ -304,7 +304,18 @@ router.patch('/weeks/:weekId/rows/:rowId', async (req, res) => {
     if (body.extras !== undefined) entry.extras = num(body.extras);
     if (body.notes !== undefined) entry.notes = body.notes || null;
 
-    entry.useManualPay = false;
+    if (body.use_manual_pay !== undefined) {
+      entry.useManualPay = Boolean(body.use_manual_pay);
+    }
+    if (body.total_pay !== undefined) {
+      if (body.use_manual_pay === false) {
+        entry.useManualPay = false;
+      } else if (body.total_pay !== '' && body.total_pay !== null) {
+        entry.useManualPay = true;
+        entry.totalPay = num(body.total_pay);
+      }
+    }
+
     applyCalc(entry, calcTimesheetRow(rowFromDb(entryToCalcRow(entry))));
     week.markModified('entries');
     await week.save();
